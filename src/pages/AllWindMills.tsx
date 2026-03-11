@@ -1,8 +1,16 @@
-import {useMemo, useState} from "react";
+import {useEffect, useMemo, useState} from "react";
 import {useNavigate} from "react-router-dom";
+import {StateleSSEClient} from "statele-sse";
+import {type TurbineTelemetry, WebClientClient} from "../generated-ts-client.ts";
 
 type TurbineStatus = "running" | "stopped";
 type AlertSeverity = "warning" | "error" | "critical";
+
+const BASE_URL = import.meta.env.VITE_API_URL;
+
+const sse = new StateleSSEClient(BASE_URL + "/sse")
+const restClient = new WebClientClient(BASE_URL)
+
 
 interface WindMillMeasurement {
     turbineId: string;
@@ -183,6 +191,25 @@ const WindmillVisual = ({status}: {status: TurbineStatus}) => (
 const AllWindMills = () => {
     const navigate = useNavigate();
     const [muteAlerts, setMuteAlerts] = useState(false);
+    const [measurements, setMeasurements] = useState<TurbineTelemetry[]>([])
+    const [alerts, setAlerts] = useState<TurbineAlert[]>([])
+    useEffect(() => {
+        sse.listen(async (id) => {
+            return await restClient.getTelemetry(id)
+        }, (data) => {
+            setMeasurements(data);
+            console.log(measurements);
+        })
+    }, []);
+
+    useEffect(() => {
+        sse.listen(async (id) => {
+            return await restClient.getAlert(id)
+        }, (w) => {
+            setAlerts(w);
+            console.log(alerts);
+        })
+    }, []);
 
     const alertFeed = useMemo(() => {
         return mockWindMills.flatMap((item) =>
