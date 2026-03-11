@@ -1,5 +1,7 @@
 import './index.css'
 import LoginPage from "./pages/LoginPage.tsx";
+import AllWindMills from "./pages/AllWindMills.tsx";
+import OneWindMill from "./pages/OneWindMill.tsx";
 import {BrowserRouter, Route, Routes} from "react-router-dom";
 
 
@@ -14,10 +16,10 @@ function App() {
                 <Route path="/" element={<LoginPage/>}/>
 
                 {/* The windmill overview */}
-                <Route path="/rooms" element={<AllWindMills/>}/>
+                <Route path="/dashboard" element={<AllWindMills/>}/>
 
                 {/* The specific windmill */}
-                <Route path="/chat/:roomName" element={<OneWindMill/>}/>
+                <Route path="/device/:deviceId" element={<OneWindMill/>}/>
             </Routes>
         </BrowserRouter>
     </>
