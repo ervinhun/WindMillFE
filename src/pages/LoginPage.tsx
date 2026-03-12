@@ -32,10 +32,12 @@ const LoginPage = () => {
 
             const data = await response.json();
 
-            // Store the token and user info
+            // Store token and role in consistent keys for the rest of the app.
+            const resolvedRole = data.roleName ?? data.role ?? "viewer";
             localStorage.setItem('token', data.token);
-            localStorage.setItem('username', data.userName);
-            localStorage.setItem('role', data.role);
+            localStorage.setItem('username', data.userName ?? username);
+            localStorage.setItem('role', resolvedRole);
+            localStorage.setItem('roleName', resolvedRole);
 
             // Redirect to Dashboard
             navigate('/dashboard');
@@ -105,4 +107,3 @@ const LoginPage = () => {
 }
 
 export default LoginPage;
-
