@@ -4,7 +4,6 @@ import {StateleSSEClient} from "statele-sse";
 import {type TurbineAlert as ApiTurbineAlert, type TurbineTelemetry, WebClientClient} from "../generated-ts-client.ts";
 
 type TurbineStatus = "running" | "stopped";
-type AlertSeverity = "warning" | "error" | "critical";
 
 const BASE_URL = import.meta.env.VITE_API_URL;
 
@@ -16,7 +15,7 @@ const restClient = new WebClientClient(BASE_URL);
 
 interface AlertFeedItem {
     id: string;
-    severity: AlertSeverity;
+    severity: string;
     message: string;
     at: string;
     turbineName: string;
@@ -29,13 +28,13 @@ interface WindMillCardData {
     powerHistory: number[];
 }
 
-const severityBadgeClass: Record<AlertSeverity, string> = {
+const severityBadgeClass: Record<string, string> = {
     warning: "badge-warning",
     error: "badge-error",
     critical: "badge-secondary"
 };
 
-const severityTone: Record<AlertSeverity, number> = {
+const severityTone: Record<string, number> = {
     warning: 520,
     error: 680,
     critical: 860
@@ -43,7 +42,7 @@ const severityTone: Record<AlertSeverity, number> = {
 
 const MAX_ALERT_ITEMS = 120;
 
-const normalizeSeverity = (severity?: string): AlertSeverity => {
+const normalizeSeverity = (severity?: string): string => {
     const value = severity?.toLowerCase();
     if (value === "critical" || value === "error" || value === "warning") return value;
     return "warning";
@@ -197,6 +196,7 @@ const AllWindMills = () => {
     }, []);
 
     useEffect(() => {
+        console.log('Checking the id: {id}')
         const unsub = sse.listen(async (id) => {
             return await restClient.getTelemetry(id);
         }, (payload) => {
@@ -317,7 +317,7 @@ const AllWindMills = () => {
         };
     }, [alertFeed, windMills]);
 
-    const playSeverityTone = useCallback((severity: AlertSeverity) => {
+    const playSeverityTone = useCallback((severity: string) => {
         if (muteAlerts) return;
         if (typeof window === "undefined" || typeof window.AudioContext === "undefined") return;
 

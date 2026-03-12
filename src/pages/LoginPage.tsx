@@ -1,20 +1,58 @@
 import {useState} from "react";
+import {useNavigate} from "react-router-dom";
 
 const LoginPage = () => {
-    //const API_URL = import.meta.env.API_URL;
+    const API_URL = import.meta.env.VITE_API_URL;
 
     const [username, setUsername] = useState('');
     const [password, setPassword] = useState('');
-    const [error, ] = useState('');
-    const [loading, ] = useState(true);
+    const [error, setError] = useState('');
+    const [loading, setLoading] = useState(false);
 
+    const navigate = useNavigate();
+
+    const handleLogin = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setError('');
+        setLoading(true);
+
+        try {
+            // Updated to use the environment variable
+            const response = await fetch(`${API_URL}/api/Login/Login`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ UserName: username, Password: password }),
+            });
+
+            if (!response.ok) {
+                // Try to get error message from backend if available
+                const errorData = await response.json().catch(() => ({}));
+                throw new Error(errorData.message || 'Invalid username or password');
+            }
+
+            const data = await response.json();
+
+            // Store the token and user info
+            localStorage.setItem('token', data.token);
+            localStorage.setItem('username', data.userName);
+            localStorage.setItem('role', data.role);
+
+            // Redirect to Dashboard
+            navigate('/dashboard');
+        } catch (err: any) {
+            setError(err.message || 'An error occurred during login');
+        } finally {
+            setLoading(false);
+        }
+    };
+    
     return (
         <div className="flex min-h-screen items-center justify-center bg-base-200">
             <div className="card w-full max-w-sm bg-base-100 shadow-xl">
                 <div className="card-body">
                     <h2 className="card-title justify-center text-2xl font-bold">Welcome</h2>
 
-                    <form className="space-y-4">
+                    <form className="space-y-4" onSubmit={handleLogin}>
                         <div className="form-control">
                             <label className="label">
                                 <span className="label-text">Username</span>
@@ -60,8 +98,6 @@ const LoginPage = () => {
                             </button>
                         </div>
                     </form>
-
-                    <div className="divider text-xs opacity-50">OR</div>
                 </div>
             </div>
         </div>
