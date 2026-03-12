@@ -1,8 +1,8 @@
 import './index.css'
 import LoginPage from "./pages/LoginPage.tsx";
-import AllWindMills from "./pages/AllWindMills.tsx";
 import OneWindMill from "./pages/OneWindMill.tsx";
 import {BrowserRouter, Route, Routes} from "react-router-dom";
+import AllWindMills from "./pages/AllWindMills.tsx";
 
 
 function App() {
