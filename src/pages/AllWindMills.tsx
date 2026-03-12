@@ -1,143 +1,61 @@
-import {useMemo, useState} from "react";
+import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import {useNavigate} from "react-router-dom";
+import {type TurbineAlert as ApiTurbineAlert, type TurbineTelemetry} from "../generated-ts-client.ts";
+import {dismissAlert, normalizeSeverity, restoreDismissedAlerts, toTimestamp, useWindmillRealtime} from "../util/windmillRealtime.ts";
 
 type TurbineStatus = "running" | "stopped";
-type AlertSeverity = "warning" | "error" | "critical";
 
-interface WindMillMeasurement {
-    turbineId: string;
-    turbineName: string;
-    farmId: string;
-    timestamp: string;
-    windSpeed: number;
-    windDirection: number;
-    ambientTemperature: number;
-    rotorSpeed: number;
-    powerOutput: number;
-    nacelleDirection: number;
-    bladePitch: number;
-    generatorTemp: number;
-    gearboxTemp: number;
-    vibration: number;
-    status: TurbineStatus;
-}
-
-interface TurbineAlert {
+interface AlertFeedItem {
     id: string;
-    severity: AlertSeverity;
+    severity: string;
     message: string;
     at: string;
+    turbineName: string;
+    turbineId: string;
 }
 
 interface WindMillCardData {
-    measurement: WindMillMeasurement;
-    alerts: TurbineAlert[];
+    measurement: TurbineTelemetry;
+    alerts: AlertFeedItem[];
     powerHistory: number[];
 }
 
-const mockWindMills: WindMillCardData[] = [
-    {
-        measurement: {
-            turbineId: "turbine-alpha",
-            turbineName: "Alpha",
-            farmId: "farm-north",
-            timestamp: "2024-01-15T10:30:00.000Z",
-            windSpeed: 8.5,
-            windDirection: 245.3,
-            ambientTemperature: 12.4,
-            rotorSpeed: 14.2,
-            powerOutput: 1250.5,
-            nacelleDirection: 243.1,
-            bladePitch: 7.2,
-            generatorTemp: 52.3,
-            gearboxTemp: 48.1,
-            vibration: 2.45,
-            status: "running"
-        },
-        alerts: [],
-        powerHistory: [980, 1020, 1110, 1170, 1220, 1280, 1250]
-    },
-    {
-        measurement: {
-            turbineId: "turbine-bravo",
-            turbineName: "Bravo",
-            farmId: "farm-north",
-            timestamp: "2024-01-15T10:31:00.000Z",
-            windSpeed: 6.1,
-            windDirection: 198.7,
-            ambientTemperature: 11.9,
-            rotorSpeed: 9.8,
-            powerOutput: 740.3,
-            nacelleDirection: 202.2,
-            bladePitch: 9.6,
-            generatorTemp: 59.5,
-            gearboxTemp: 56.8,
-            vibration: 3.7,
-            status: "running"
-        },
-        alerts: [
-            {id: "b1", severity: "warning", message: "Rising vibration trend", at: "10:31"}
-        ],
-        powerHistory: [860, 820, 790, 770, 760, 745, 740]
-    },
-    {
-        measurement: {
-            turbineId: "turbine-charlie",
-            turbineName: "Charlie",
-            farmId: "farm-north",
-            timestamp: "2024-01-15T10:31:00.000Z",
-            windSpeed: 0.9,
-            windDirection: 176.1,
-            ambientTemperature: 10.2,
-            rotorSpeed: 0,
-            powerOutput: 0,
-            nacelleDirection: 176.2,
-            bladePitch: 23.3,
-            generatorTemp: 42.2,
-            gearboxTemp: 39.5,
-            vibration: 0.4,
-            status: "stopped"
-        },
-        alerts: [
-            {id: "c1", severity: "error", message: "Unexpected stop event", at: "10:27"}
-        ],
-        powerHistory: [430, 350, 280, 180, 90, 20, 0]
-    },
-    {
-        measurement: {
-            turbineId: "turbine-delta",
-            turbineName: "Delta",
-            farmId: "farm-north",
-            timestamp: "2024-01-15T10:32:00.000Z",
-            windSpeed: 9.2,
-            windDirection: 261.4,
-            ambientTemperature: 13.1,
-            rotorSpeed: 15.9,
-            powerOutput: 1398.7,
-            nacelleDirection: 260.9,
-            bladePitch: 6.1,
-            generatorTemp: 76.8,
-            gearboxTemp: 71.4,
-            vibration: 5.9,
-            status: "running"
-        },
-        alerts: [
-            {id: "d1", severity: "critical", message: "Generator overheating", at: "10:32"}
-        ],
-        powerHistory: [1120, 1210, 1300, 1380, 1440, 1420, 1398]
-    }
-];
-
-const severityBadgeClass: Record<AlertSeverity, string> = {
+const severityBadgeClass: Record<string, string> = {
     warning: "badge-warning",
     error: "badge-error",
     critical: "badge-secondary"
 };
 
-const severityTone: Record<AlertSeverity, number> = {
+const severityTone: Record<string, number> = {
     warning: 520,
     error: 680,
     critical: 860
+};
+
+const formatAt = (value?: string) => {
+    if (!value) return "-";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? "-" : date.toLocaleTimeString();
+};
+
+type HeartbeatState = {
+    label: "Live" | "Delayed" | "Stale" | "No signal";
+    ageSeconds: number | null;
+    badgeClass: string;
+    dotClass: string;
+};
+
+
+const getHeartbeatState = (timestamp: string | undefined, nowMs: number): HeartbeatState => {
+    const ts = toTimestamp(timestamp);
+    if (ts <= 0) {
+        return {label: "No signal", ageSeconds: null, badgeClass: "badge-ghost", dotClass: "bg-base-content/50"};
+    }
+
+    const ageSeconds = Math.max(0, Math.floor((nowMs - ts) / 1000));
+    if (ageSeconds <= 15) return {label: "Live", ageSeconds, badgeClass: "badge-success", dotClass: "bg-success"};
+    if (ageSeconds <= 45) return {label: "Delayed", ageSeconds, badgeClass: "badge-warning", dotClass: "bg-warning"};
+    return {label: "Stale", ageSeconds, badgeClass: "badge-error", dotClass: "bg-error"};
 };
 
 const Sparkline = ({points}: {points: number[]}) => {
@@ -183,28 +101,106 @@ const WindmillVisual = ({status}: {status: TurbineStatus}) => (
 const AllWindMills = () => {
     const navigate = useNavigate();
     const [muteAlerts, setMuteAlerts] = useState(false);
+    const [nowMs, setNowMs] = useState(() => Date.now());
+    const seenAlertIdsRef = useRef<Set<string>>(new Set());
+    const {measurements, alerts, dismissedAlertCount} = useWindmillRealtime();
 
-    const alertFeed = useMemo(() => {
-        return mockWindMills.flatMap((item) =>
-            item.alerts.map((alert) => ({
-                ...alert,
-                turbineName: item.measurement.turbineName,
-                turbineId: item.measurement.turbineId
-            }))
-        );
+    useEffect(() => {
+        const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
+        return () => window.clearInterval(timer);
     }, []);
+
+    const windMills = useMemo<WindMillCardData[]>(() => {
+        const measurementGroups = new Map<string, TurbineTelemetry[]>();
+
+        for (const telemetry of measurements) {
+            const turbineId = telemetry.turbineId;
+            if (!turbineId) continue;
+            const existing = measurementGroups.get(turbineId) ?? [];
+            existing.push(telemetry);
+            measurementGroups.set(turbineId, existing);
+        }
+
+        const byTurbineAlerts = new Map<string, AlertFeedItem[]>();
+        for (const alert of alerts) {
+            if (!alert.turbineId) continue;
+            const id = String(alert.id ?? `${alert.turbineId}-${alert.timestamp}-${alert.message}`);
+            const normalized: AlertFeedItem = {
+                id,
+                severity: normalizeSeverity(alert.severity),
+                message: alert.message ?? "No message",
+                at: formatAt(alert.timestamp),
+                turbineName: "",
+                turbineId: alert.turbineId
+            };
+            const existing = byTurbineAlerts.get(alert.turbineId) ?? [];
+            existing.push(normalized);
+            byTurbineAlerts.set(alert.turbineId, existing);
+        }
+
+        const cards: WindMillCardData[] = [];
+        measurementGroups.forEach((items, turbineId) => {
+            const sorted = [...items].sort((a, b) => toTimestamp(a.timestamp) - toTimestamp(b.timestamp));
+            const latest = sorted[sorted.length - 1];
+            if (!latest) return;
+
+            const powerHistory = sorted
+                .map((measurement) => measurement.powerOutput)
+                .filter((value): value is number => typeof value === "number")
+                .slice(-14);
+
+            const turbineAlerts = (byTurbineAlerts.get(turbineId) ?? [])
+                .map((alert) => ({...alert, turbineName: latest.turbineName ?? turbineId}))
+                .sort((a, b) => {
+                    const aData = alerts.find((source) => String(source.id ?? "") === a.id);
+                    const bData = alerts.find((source) => String(source.id ?? "") === b.id);
+                    return toTimestamp(bData?.timestamp) - toTimestamp(aData?.timestamp);
+                })
+                .slice(0, 3);
+
+            cards.push({
+                measurement: latest,
+                alerts: turbineAlerts,
+                powerHistory
+            });
+        });
+
+        return cards.sort((a, b) => (a.measurement.turbineName ?? "").localeCompare(b.measurement.turbineName ?? ""));
+    }, [measurements, alerts]);
+
+    const alertFeed = useMemo<AlertFeedItem[]>(() => {
+        return alerts
+            .filter((alert): alert is ApiTurbineAlert & {turbineId: string} => Boolean(alert.turbineId))
+            .map((alert) => {
+                const matchingTurbine = windMills.find((wm) => wm.measurement.turbineId === alert.turbineId);
+                return {
+                    id: String(alert.id ?? `${alert.turbineId}-${alert.timestamp}-${alert.message}`),
+                    severity: normalizeSeverity(alert.severity),
+                    message: alert.message ?? "No message",
+                    at: formatAt(alert.timestamp),
+                    turbineId: alert.turbineId,
+                    turbineName: matchingTurbine?.measurement.turbineName ?? alert.turbineId
+                };
+            })
+            .sort((a, b) => {
+                const aRaw = alerts.find((x) => String(x.id ?? "") === a.id);
+                const bRaw = alerts.find((x) => String(x.id ?? "") === b.id);
+                return toTimestamp(bRaw?.timestamp) - toTimestamp(aRaw?.timestamp);
+            })
+            .slice(0, 30);
+    }, [alerts, windMills]);
 
     const counters = useMemo(() => {
         return {
-            total: mockWindMills.length,
-            running: mockWindMills.filter((wm) => wm.measurement.status === "running").length,
+            total: windMills.length,
+            running: windMills.filter((wm) => wm.measurement.isRunning).length,
             warnings: alertFeed.filter((a) => a.severity === "warning").length,
             errors: alertFeed.filter((a) => a.severity === "error").length,
             critical: alertFeed.filter((a) => a.severity === "critical").length
         };
-    }, [alertFeed]);
+    }, [alertFeed, windMills]);
 
-    const playSeverityTone = (severity: AlertSeverity) => {
+    const playSeverityTone = useCallback((severity: string) => {
         if (muteAlerts) return;
         if (typeof window === "undefined" || typeof window.AudioContext === "undefined") return;
 
@@ -225,7 +221,15 @@ const AllWindMills = () => {
         oscillator.onended = () => {
             void context.close();
         };
-    };
+    }, [muteAlerts]);
+
+    useEffect(() => {
+        for (const alert of alertFeed) {
+            if (seenAlertIdsRef.current.has(alert.id)) continue;
+            seenAlertIdsRef.current.add(alert.id);
+            playSeverityTone(alert.severity);
+        }
+    }, [alertFeed, playSeverityTone]);
 
     return (
         <div className="min-h-screen bg-base-200 p-4 md:p-8">
@@ -241,6 +245,11 @@ const AllWindMills = () => {
                     >
                         {muteAlerts ? "Alerts muted" : "Alert sound on"}
                     </button>
+                    {dismissedAlertCount > 0 && (
+                        <button className="btn btn-outline" onClick={restoreDismissedAlerts}>
+                            Restore dismissed ({dismissedAlertCount})
+                        </button>
+                    )}
                 </div>
 
                 <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
@@ -281,6 +290,12 @@ const AllWindMills = () => {
                                     <div className="flex items-center gap-2">
                                         <span className="text-xs opacity-60">{alert.at}</span>
                                         <button
+                                            className="btn btn-xs btn-ghost"
+                                            onClick={() => dismissAlert(alert.id)}
+                                        >
+                                            Dismiss
+                                        </button>
+                                        <button
                                             className="btn btn-xs btn-outline"
                                             onClick={() => playSeverityTone(alert.severity)}
                                         >
@@ -293,56 +308,73 @@ const AllWindMills = () => {
                     )}
                 </div>
 
+                {windMills.length === 0 && (
+                    <div className="rounded-box bg-base-100 p-6 text-sm opacity-70 shadow">Waiting for telemetry...</div>
+                )}
+
                 <div className="grid gap-4 md:grid-cols-2">
-                    {mockWindMills.map((wm) => (
-                        <button
-                            key={wm.measurement.turbineId}
-                            className="card cursor-pointer bg-base-100 text-left shadow-lg transition hover:-translate-y-1 hover:shadow-2xl"
-                            onClick={() => navigate(`/device/${wm.measurement.turbineId}`)}
-                        >
-                            <div className="card-body gap-4">
-                                <div className="flex items-center justify-between">
+                    {windMills.map((wm) => {
+                        const status: TurbineStatus = wm.measurement.isRunning ? "running" : "stopped";
+                        const turbineName = wm.measurement.turbineName ?? wm.measurement.turbineId ?? "Unknown";
+                        const turbineId = wm.measurement.turbineId ?? "unknown";
+                        const heartbeat = getHeartbeatState(wm.measurement.timestamp, nowMs);
+
+                        return (
+                            <button
+                                key={turbineId}
+                                className="card cursor-pointer bg-base-100 text-left shadow-lg transition hover:-translate-y-1 hover:shadow-2xl"
+                                onClick={() => navigate(`/device/${turbineId}`)}
+                            >
+                                <div className="card-body gap-4">
+                                    <div className="flex items-center justify-between">
+                                        <div>
+                                            <h3 className="card-title">{turbineName}</h3>
+                                            <p className="text-sm opacity-70">{turbineId}</p>
+                                            <div className="mt-1 flex items-center gap-2 text-xs">
+                                                <span className={`inline-block h-2 w-2 rounded-full ${heartbeat.dotClass} ${heartbeat.label === "Live" ? "animate-pulse" : ""}`}/>
+                                                <span className={`badge badge-xs ${heartbeat.badgeClass}`}>{heartbeat.label}</span>
+                                                <span className="opacity-60">
+                                                    {heartbeat.ageSeconds === null ? "timestamp missing" : `${heartbeat.ageSeconds}s ago`}
+                                                </span>
+                                            </div>
+                                        </div>
+                                        <WindmillVisual status={status}/>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-3 text-sm md:grid-cols-3">
+                                        <div className="rounded-box bg-base-200 p-2">
+                                            <div className="opacity-70">Power output</div>
+                                            <div className="text-base font-semibold">{(wm.measurement.powerOutput ?? 0).toFixed(1)} kW</div>
+                                        </div>
+                                        <div className="rounded-box bg-base-200 p-2">
+                                            <div className="opacity-70">Wind speed</div>
+                                            <div className="text-base font-semibold">{(wm.measurement.windSpeed ?? 0).toFixed(1)} m/s</div>
+                                        </div>
+                                        <div className="rounded-box bg-base-200 p-2">
+                                            <div className="opacity-70">Rotor speed</div>
+                                            <div className="text-base font-semibold">{(wm.measurement.rotorSpeed ?? 0).toFixed(1)} rpm</div>
+                                        </div>
+                                    </div>
+
                                     <div>
-                                        <h3 className="card-title">{wm.measurement.turbineName}</h3>
-                                        <p className="text-sm opacity-70">{wm.measurement.turbineId}</p>
+                                        <div className="mb-2 text-sm font-medium">Energy output trend</div>
+                                        <Sparkline points={wm.powerHistory}/>
                                     </div>
-                                    <WindmillVisual status={wm.measurement.status}/>
-                                </div>
 
-                                <div className="grid grid-cols-2 gap-3 text-sm md:grid-cols-3">
-                                    <div className="rounded-box bg-base-200 p-2">
-                                        <div className="opacity-70">Power output</div>
-                                        <div className="text-base font-semibold">{wm.measurement.powerOutput.toFixed(1)} kW</div>
-                                    </div>
-                                    <div className="rounded-box bg-base-200 p-2">
-                                        <div className="opacity-70">Wind speed</div>
-                                        <div className="text-base font-semibold">{wm.measurement.windSpeed.toFixed(1)} m/s</div>
-                                    </div>
-                                    <div className="rounded-box bg-base-200 p-2">
-                                        <div className="opacity-70">Rotor speed</div>
-                                        <div className="text-base font-semibold">{wm.measurement.rotorSpeed.toFixed(1)} rpm</div>
-                                    </div>
-                                </div>
-
-                                <div>
-                                    <div className="mb-2 text-sm font-medium">Energy output trend</div>
-                                    <Sparkline points={wm.powerHistory}/>
-                                </div>
-
-                                <div className="flex flex-wrap items-center gap-2">
-                                    <span className={`badge ${wm.measurement.status === "running" ? "badge-success" : "badge-error"}`}>
-                                        {wm.measurement.status.toUpperCase()}
-                                    </span>
-                                    {wm.alerts.length === 0 && <span className="badge badge-ghost">No active alerts</span>}
-                                    {wm.alerts.map((alert) => (
-                                        <span key={alert.id} className={`badge ${severityBadgeClass[alert.severity]}`}>
-                                            {alert.severity}
+                                    <div className="flex flex-wrap items-center gap-2">
+                                        <span className={`badge ${status === "running" ? "badge-success" : "badge-error"}`}>
+                                            {status.toUpperCase()}
                                         </span>
-                                    ))}
+                                        {wm.alerts.length === 0 && <span className="badge badge-ghost">No active alerts</span>}
+                                        {wm.alerts.map((alert) => (
+                                            <span key={alert.id} className={`badge ${severityBadgeClass[alert.severity]}`}>
+                                                {alert.severity}
+                                            </span>
+                                        ))}
+                                    </div>
                                 </div>
-                            </div>
-                        </button>
-                    ))}
+                            </button>
+                        );
+                    })}
                 </div>
             </div>
         </div>
