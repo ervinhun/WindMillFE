@@ -1,13 +1,17 @@
 import {useEffect, useMemo, useState} from "react";
 import {Link, useParams} from "react-router-dom";
-import {
-    type ActionRequest,
-    type TurbineAlert,
-    type TurbineTelemetry
-} from "../generated-ts-client.ts";
-import {getSharedSseClient, getSharedWebClient} from "../util/apiClient.ts";
+import {type ActionRequest} from "../generated-ts-client.ts";
+import {getSharedWebClient} from "../util/apiClient.ts";
 import {getCurrentRole} from "../util/auth.ts";
-import {mergeAlerts, mergeTelemetry, normalizePayload, normalizeSeverity, toTimestamp, type AlertSeverity} from "../util/windmillRealtime.ts";
+import {
+    dismissAlert,
+    getAlertId,
+    normalizeSeverity,
+    restoreDismissedAlerts,
+    toTimestamp,
+    type AlertSeverity,
+    useWindmillRealtime
+} from "../util/windmillRealtime.ts";
 
 type TrendSeries = {
     label: string;
@@ -61,16 +65,14 @@ const Sparkline = ({points, color}: {points: number[]; color: string}) => {
 
 const OneWindMill = () => {
     const {deviceId} = useParams();
-    const sse = useMemo(() => getSharedSseClient(), []);
     const restClient = useMemo(() => getSharedWebClient(), []);
-    const [measurements, setMeasurements] = useState<TurbineTelemetry[]>([]);
-    const [alerts, setAlerts] = useState<TurbineAlert[]>([]);
     const [nowMs, setNowMs] = useState(() => Date.now());
     const [reportingInterval, setReportingInterval] = useState(10);
     const [pitchAngle, setPitchAngle] = useState(10);
     const [stopReason, setStopReason] = useState("");
     const [actionMessage, setActionMessage] = useState<string>("");
     const [actionLoading, setActionLoading] = useState(false);
+    const {measurements, alerts, dismissedAlertCount} = useWindmillRealtime();
 
     const role = useMemo(() => getCurrentRole(), []);
     const canControl = role === "admin" || role === "engineer";
@@ -79,32 +81,6 @@ const OneWindMill = () => {
         const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
         return () => window.clearInterval(timer);
     }, []);
-
-    useEffect(() => {
-        const unsub = sse.listen(async (id: string) => {
-            return await restClient.getTelemetry(id);
-        }, (payload: unknown) => {
-            const {items, isSnapshot} = normalizePayload<TurbineTelemetry>(payload);
-            setMeasurements((prev) => mergeTelemetry(prev, items, isSnapshot));
-        });
-
-        return () => {
-            unsub?.();
-        };
-    }, [restClient, sse]);
-
-    useEffect(() => {
-        const unsub = sse.listen(async (id: string) => {
-            return await restClient.getAlert(id);
-        }, (payload: unknown) => {
-            const {items, isSnapshot} = normalizePayload<TurbineAlert>(payload);
-            setAlerts((prev) => mergeAlerts(prev, items, isSnapshot));
-        });
-
-        return () => {
-            unsub?.();
-        };
-    }, [restClient, sse]);
 
     const measurementsForTurbine = useMemo(() => {
         return measurements
@@ -365,7 +341,14 @@ const OneWindMill = () => {
                 </div>
 
                 <div className="rounded-box bg-base-100 p-4 shadow-lg">
-                    <h2 className="mb-3 text-lg font-semibold">Recent alerts</h2>
+                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                        <h2 className="text-lg font-semibold">Recent alerts</h2>
+                        {dismissedAlertCount > 0 && (
+                            <button className="btn btn-xs btn-outline" onClick={restoreDismissedAlerts}>
+                                Restore dismissed ({dismissedAlertCount})
+                            </button>
+                        )}
+                    </div>
                     {turbineAlerts.length === 0 && <p className="text-sm opacity-70">No recent alerts.</p>}
                     <div className="space-y-2">
                         {turbineAlerts.map((alert) => {
@@ -376,9 +359,17 @@ const OneWindMill = () => {
                                         <span className={`badge ${severityBadgeClass[severity]}`}>{severity.toUpperCase()}</span>
                                         <span>{alert.message ?? "No message"}</span>
                                     </div>
-                                    <span className="text-xs opacity-70">
-                                        {alert.timestamp ? new Date(alert.timestamp).toLocaleTimeString() : "-"}
-                                    </span>
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-xs opacity-70">
+                                            {alert.timestamp ? new Date(alert.timestamp).toLocaleTimeString() : "-"}
+                                        </span>
+                                        <button
+                                            className="btn btn-xs btn-ghost"
+                                            onClick={() => dismissAlert(getAlertId(alert))}
+                                        >
+                                            Dismiss
+                                        </button>
+                                    </div>
                                 </div>
                             );
                         })}

@@ -1,8 +1,7 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import {useNavigate} from "react-router-dom";
 import {type TurbineAlert as ApiTurbineAlert, type TurbineTelemetry} from "../generated-ts-client.ts";
-import {getSharedSseClient, getSharedWebClient} from "../util/apiClient.ts";
-import {mergeAlerts, mergeTelemetry, normalizePayload, normalizeSeverity, toTimestamp} from "../util/windmillRealtime.ts";
+import {dismissAlert, normalizeSeverity, restoreDismissedAlerts, toTimestamp, useWindmillRealtime} from "../util/windmillRealtime.ts";
 
 type TurbineStatus = "running" | "stopped";
 
@@ -101,44 +100,14 @@ const WindmillVisual = ({status}: {status: TurbineStatus}) => (
 
 const AllWindMills = () => {
     const navigate = useNavigate();
-    const sse = useMemo(() => getSharedSseClient(), []);
-    const restClient = useMemo(() => getSharedWebClient(), []);
     const [muteAlerts, setMuteAlerts] = useState(false);
-    const [measurements, setMeasurements] = useState<TurbineTelemetry[]>([]);
-    const [alerts, setAlerts] = useState<ApiTurbineAlert[]>([]);
     const [nowMs, setNowMs] = useState(() => Date.now());
     const seenAlertIdsRef = useRef<Set<string>>(new Set());
+    const {measurements, alerts, dismissedAlertCount} = useWindmillRealtime();
 
     useEffect(() => {
         const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
         return () => window.clearInterval(timer);
-    }, []);
-
-    useEffect(() => {
-        const unsub = sse.listen(async (id) => {
-            return await restClient.getTelemetry(id);
-        }, (payload) => {
-            const {items, isSnapshot} = normalizePayload<TurbineTelemetry>(payload);
-            setMeasurements((prev) => mergeTelemetry(prev, items, isSnapshot));
-        });
-
-        return () => {
-            unsub?.();
-        };
-    }, []);
-
-
-    useEffect(() => {
-        const unsub = sse.listen(async (id) => {
-            return await restClient.getAlert(id);
-        }, (payload) => {
-            const {items, isSnapshot} = normalizePayload<ApiTurbineAlert>(payload);
-            setAlerts((prev) => mergeAlerts(prev, items, isSnapshot));
-        });
-
-        return () => {
-            unsub?.();
-        };
     }, []);
 
     const windMills = useMemo<WindMillCardData[]>(() => {
@@ -276,6 +245,11 @@ const AllWindMills = () => {
                     >
                         {muteAlerts ? "Alerts muted" : "Alert sound on"}
                     </button>
+                    {dismissedAlertCount > 0 && (
+                        <button className="btn btn-outline" onClick={restoreDismissedAlerts}>
+                            Restore dismissed ({dismissedAlertCount})
+                        </button>
+                    )}
                 </div>
 
                 <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
@@ -315,6 +289,12 @@ const AllWindMills = () => {
                                     </div>
                                     <div className="flex items-center gap-2">
                                         <span className="text-xs opacity-60">{alert.at}</span>
+                                        <button
+                                            className="btn btn-xs btn-ghost"
+                                            onClick={() => dismissAlert(alert.id)}
+                                        >
+                                            Dismiss
+                                        </button>
                                         <button
                                             className="btn btn-xs btn-outline"
                                             onClick={() => playSeverityTone(alert.severity)}

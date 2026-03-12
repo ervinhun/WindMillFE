@@ -1,3 +1,5 @@
+import {useSyncExternalStore} from "react";
+import {getSharedSseClient, getSharedWebClient} from "./apiClient.ts";
 import type {TurbineAlert, TurbineTelemetry} from "../generated-ts-client.ts";
 
 const MAX_POINTS_PER_TURBINE = 32;
@@ -9,6 +11,107 @@ export type PayloadResult<T> = {
 };
 
 export type AlertSeverity = "warning" | "error" | "critical";
+
+export type WindmillRealtimeSnapshot = {
+	measurements: TurbineTelemetry[];
+	alerts: TurbineAlert[];
+	dismissedAlertCount: number;
+};
+
+type Listener = () => void;
+
+const listeners = new Set<Listener>();
+let realtimeStarted = false;
+let snapshot: WindmillRealtimeSnapshot = {
+	measurements: [],
+	alerts: [],
+	dismissedAlertCount: 0,
+};
+let rawAlerts: TurbineAlert[] = [];
+let dismissedAlertIds = new Set<string>();
+
+const notifyListeners = () => {
+	for (const listener of listeners) {
+		listener();
+	}
+};
+
+export const getAlertId = (alert: TurbineAlert) =>
+	String(alert.id ?? `${alert.turbineId ?? "t"}-${alert.timestamp ?? ""}-${alert.message ?? ""}`);
+
+const refreshAlertSnapshot = () => {
+	const activeIds = new Set(rawAlerts.map(getAlertId));
+	dismissedAlertIds = new Set([...dismissedAlertIds].filter((id) => activeIds.has(id)));
+
+	snapshot = {
+		...snapshot,
+		alerts: rawAlerts.filter((alert) => !dismissedAlertIds.has(getAlertId(alert))),
+		dismissedAlertCount: dismissedAlertIds.size,
+	};
+};
+
+const updateMeasurements = (nextMeasurements: TurbineTelemetry[]) => {
+	snapshot = {
+		...snapshot,
+		measurements: nextMeasurements,
+	};
+	notifyListeners();
+};
+
+const updateAlerts = (nextAlerts: TurbineAlert[]) => {
+	rawAlerts = nextAlerts;
+	refreshAlertSnapshot();
+	notifyListeners();
+};
+
+const startRealtime = () => {
+	if (realtimeStarted) return;
+	realtimeStarted = true;
+
+	const sse = getSharedSseClient();
+	const restClient = getSharedWebClient();
+
+	sse.listen(async (id: string) => {
+		return await restClient.getTelemetry(id);
+	}, (payload: unknown) => {
+		const {items, isSnapshot} = normalizePayload<TurbineTelemetry>(payload);
+		updateMeasurements(mergeTelemetry(snapshot.measurements, items, isSnapshot));
+	});
+
+	sse.listen(async (id: string) => {
+		return await restClient.getAlert(id);
+	}, (payload: unknown) => {
+		const {items, isSnapshot} = normalizePayload<TurbineAlert>(payload);
+		updateAlerts(mergeAlerts(rawAlerts, items, isSnapshot));
+	});
+};
+
+const subscribe = (listener: Listener) => {
+	startRealtime();
+	listeners.add(listener);
+
+	return () => {
+		listeners.delete(listener);
+	};
+};
+
+const getSnapshot = () => snapshot;
+
+export const useWindmillRealtime = () => useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+
+export const dismissAlert = (alertId: string) => {
+	if (dismissedAlertIds.has(alertId)) return;
+	dismissedAlertIds.add(alertId);
+	refreshAlertSnapshot();
+	notifyListeners();
+};
+
+export const restoreDismissedAlerts = () => {
+	if (dismissedAlertIds.size === 0) return;
+	dismissedAlertIds = new Set();
+	refreshAlertSnapshot();
+	notifyListeners();
+};
 
 export const toTimestamp = (value?: string) => {
 	if (!value) return 0;
