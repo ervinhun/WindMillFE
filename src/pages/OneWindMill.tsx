@@ -4,9 +4,10 @@ import {StateleSSEClient} from "statele-sse";
 import {
     type ActionRequest,
     type TurbineAlert,
-    type TurbineTelemetry,
-    WebClientClient
+    type TurbineTelemetry
 } from "../generated-ts-client.ts";
+import {createWebClient, getSseUrl} from "../util/apiClient.ts";
+import {getCurrentRole} from "../util/auth.ts";
 
 type TrendSeries = {
     label: string;
@@ -17,9 +18,8 @@ type TrendSeries = {
 
 type AlertSeverity = "warning" | "error" | "critical";
 
-const BASE_URL = import.meta.env.VITE_API_URL;
-const sse = new StateleSSEClient(BASE_URL + "/sse");
-const restClient = new WebClientClient(BASE_URL);
+const sse = new StateleSSEClient(getSseUrl());
+const restClient = createWebClient();
 
 const MAX_POINTS_PER_TURBINE = 32;
 
@@ -95,30 +95,6 @@ const severityBadgeClass: Record<AlertSeverity, string> = {
     warning: "badge-warning",
     error: "badge-error",
     critical: "badge-secondary"
-};
-
-const parseRoleFromToken = (token: string): string | null => {
-    const parts = token.split(".");
-    if (parts.length < 2) return null;
-    try {
-        const raw = atob(parts[1].replace(/-/g, "+").replace(/_/g, "/"));
-        const json = JSON.parse(raw) as Record<string, unknown>;
-        const role = json.role ?? json.roleName ?? json["http://schemas.microsoft.com/ws/2008/06/identity/claims/role"];
-        return typeof role === "string" ? role : null;
-    } catch {
-        return null;
-    }
-};
-
-const getCurrentRole = () => {
-    if (typeof window === "undefined") return "viewer";
-    const direct = localStorage.getItem("roleName") ?? localStorage.getItem("role") ?? localStorage.getItem("userRole");
-    if (direct) return direct.toLowerCase();
-
-    const token = localStorage.getItem("token") ?? localStorage.getItem("accessToken") ?? localStorage.getItem("authToken");
-    if (!token) return "viewer";
-    const parsed = parseRoleFromToken(token);
-    return parsed?.toLowerCase() ?? "viewer";
 };
 
 const Sparkline = ({points, color}: {points: number[]; color: string}) => {

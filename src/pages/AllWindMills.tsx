@@ -1,17 +1,16 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import {useNavigate} from "react-router-dom";
 import {StateleSSEClient} from "statele-sse";
-import {type TurbineAlert as ApiTurbineAlert, type TurbineTelemetry, WebClientClient} from "../generated-ts-client.ts";
+import {type TurbineAlert as ApiTurbineAlert, type TurbineTelemetry} from "../generated-ts-client.ts";
+import {createWebClient, getSseUrl} from "../util/apiClient.ts";
 
 type TurbineStatus = "running" | "stopped";
-
-const BASE_URL = import.meta.env.VITE_API_URL;
 
 const MAX_POINTS_PER_TURBINE = 32;
 
 
-const sse = new StateleSSEClient(BASE_URL + "/sse");
-const restClient = new WebClientClient(BASE_URL);
+const sse = new StateleSSEClient(getSseUrl());
+const restClient = createWebClient();
 
 interface AlertFeedItem {
     id: string;
@@ -196,7 +195,6 @@ const AllWindMills = () => {
     }, []);
 
     useEffect(() => {
-        console.log('Checking the id: {id}')
         const unsub = sse.listen(async (id) => {
             return await restClient.getTelemetry(id);
         }, (payload) => {
@@ -222,10 +220,6 @@ const AllWindMills = () => {
             unsub?.();
         };
     }, []);
-
-    useEffect(() => {
-        console.log(measurements)
-    }, [measurements]);
 
     const windMills = useMemo<WindMillCardData[]>(() => {
         const measurementGroups = new Map<string, TurbineTelemetry[]>();
@@ -488,5 +482,4 @@ const AllWindMills = () => {
 };
 
 export default AllWindMills;
-
 

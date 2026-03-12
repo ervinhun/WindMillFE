@@ -23,3 +23,4 @@ export const createWebClient = () => new WebClientClient(BASE_URL, authenticated
 
 export const getSseUrl = () => `${BASE_URL}/sse`;
 
+
