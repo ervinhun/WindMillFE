@@ -1,13 +1,13 @@
 import {useEffect, useMemo, useState} from "react";
 import {Link, useParams} from "react-router-dom";
-import {StateleSSEClient} from "statele-sse";
 import {
     type ActionRequest,
     type TurbineAlert,
     type TurbineTelemetry
 } from "../generated-ts-client.ts";
-import {createWebClient, getSseUrl} from "../util/apiClient.ts";
+import {getSharedSseClient, getSharedWebClient} from "../util/apiClient.ts";
 import {getCurrentRole} from "../util/auth.ts";
+import {mergeAlerts, mergeTelemetry, normalizePayload, normalizeSeverity, toTimestamp, type AlertSeverity} from "../util/windmillRealtime.ts";
 
 type TrendSeries = {
     label: string;
@@ -16,85 +16,25 @@ type TrendSeries = {
     points: number[];
 };
 
-type AlertSeverity = "warning" | "error" | "critical";
-
-const sse = new StateleSSEClient(getSseUrl());
-const restClient = createWebClient();
-
-const MAX_POINTS_PER_TURBINE = 32;
-
-const toTimestamp = (value?: string) => {
-    if (!value) return 0;
-    const parsed = Date.parse(value);
-    return Number.isNaN(parsed) ? 0 : parsed;
-};
-
-const normalizeSeverity = (value?: string): AlertSeverity => {
-    const normalized = value?.toLowerCase();
-    if (normalized === "warning" || normalized === "error" || normalized === "critical") return normalized;
-    return "warning";
-};
-
-const normalizePayload = <T,>(payload: unknown): {items: T[]; isSnapshot: boolean} => {
-    if (Array.isArray(payload)) return {items: payload as T[], isSnapshot: true};
-
-    if (payload && typeof payload === "object") {
-        const maybeData = (payload as {data?: unknown}).data;
-        if (Array.isArray(maybeData)) return {items: maybeData as T[], isSnapshot: true};
-        if (maybeData && typeof maybeData === "object") return {items: [maybeData as T], isSnapshot: false};
-        return {items: [payload as T], isSnapshot: false};
-    }
-
-    return {items: [], isSnapshot: false};
-};
-
-const mergeTelemetry = (prev: TurbineTelemetry[], incoming: TurbineTelemetry[], isSnapshot: boolean) => {
-    const base = isSnapshot ? incoming : [...prev, ...incoming];
-    const byTurbine = new Map<string, TurbineTelemetry[]>();
-
-    for (const item of base) {
-        if (!item.turbineId) continue;
-        const list = byTurbine.get(item.turbineId) ?? [];
-        list.push(item);
-        byTurbine.set(item.turbineId, list);
-    }
-
-    const next: TurbineTelemetry[] = [];
-    for (const list of byTurbine.values()) {
-        const dedup = new Map<string, TurbineTelemetry>();
-        for (const item of list) {
-            const key = item.id !== undefined
-                ? `id:${item.id}`
-                : `${item.turbineId ?? "t"}-${item.timestamp ?? ""}-${item.powerOutput ?? ""}`;
-            dedup.set(key, item);
-        }
-
-        next.push(...[...dedup.values()]
-            .sort((a, b) => toTimestamp(a.timestamp) - toTimestamp(b.timestamp))
-            .slice(-MAX_POINTS_PER_TURBINE));
-    }
-
-    return next;
-};
-
-const mergeAlerts = (prev: TurbineAlert[], incoming: TurbineAlert[], isSnapshot: boolean) => {
-    const base = isSnapshot ? incoming : [...incoming, ...prev];
-    const dedup = new Map<string, TurbineAlert>();
-
-    for (const item of base) {
-        const key = item.id !== undefined
-            ? `id:${item.id}`
-            : `${item.turbineId ?? "t"}-${item.timestamp ?? ""}-${item.message ?? ""}`;
-        dedup.set(key, item);
-    }
-
-    return [...dedup.values()].sort((a, b) => toTimestamp(b.timestamp) - toTimestamp(a.timestamp)).slice(0, 120);
+type TelemetryField = {
+    label: string;
+    value: string;
+    tone?: string;
 };
 
 const severityBadgeClass: Record<AlertSeverity, string> = {
     warning: "badge-warning",
     error: "badge-error",
     critical: "badge-secondary"
+};
+
+const formatNumber = (value: number | undefined, digits = 1, suffix = "") =>
+    typeof value === "number" ? `${value.toFixed(digits)}${suffix}` : "-";
+
+const formatDateTime = (value?: string) => {
+    if (!value) return "-";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? "-" : date.toLocaleString();
 };
 
 const Sparkline = ({points, color}: {points: number[]; color: string}) => {
@@ -121,6 +61,8 @@ const Sparkline = ({points, color}: {points: number[]; color: string}) => {
 
 const OneWindMill = () => {
     const {deviceId} = useParams();
+    const sse = useMemo(() => getSharedSseClient(), []);
+    const restClient = useMemo(() => getSharedWebClient(), []);
     const [measurements, setMeasurements] = useState<TurbineTelemetry[]>([]);
     const [alerts, setAlerts] = useState<TurbineAlert[]>([]);
     const [nowMs, setNowMs] = useState(() => Date.now());
@@ -139,9 +81,9 @@ const OneWindMill = () => {
     }, []);
 
     useEffect(() => {
-        const unsub = sse.listen(async (id) => {
+        const unsub = sse.listen(async (id: string) => {
             return await restClient.getTelemetry(id);
-        }, (payload) => {
+        }, (payload: unknown) => {
             const {items, isSnapshot} = normalizePayload<TurbineTelemetry>(payload);
             setMeasurements((prev) => mergeTelemetry(prev, items, isSnapshot));
         });
@@ -149,12 +91,12 @@ const OneWindMill = () => {
         return () => {
             unsub?.();
         };
-    }, []);
+    }, [restClient, sse]);
 
     useEffect(() => {
-        const unsub = sse.listen(async (id) => {
+        const unsub = sse.listen(async (id: string) => {
             return await restClient.getAlert(id);
-        }, (payload) => {
+        }, (payload: unknown) => {
             const {items, isSnapshot} = normalizePayload<TurbineAlert>(payload);
             setAlerts((prev) => mergeAlerts(prev, items, isSnapshot));
         });
@@ -162,7 +104,7 @@ const OneWindMill = () => {
         return () => {
             unsub?.();
         };
-    }, []);
+    }, [restClient, sse]);
 
     const measurementsForTurbine = useMemo(() => {
         return measurements
@@ -171,6 +113,12 @@ const OneWindMill = () => {
     }, [measurements, deviceId]);
 
     const latest = measurementsForTurbine[measurementsForTurbine.length - 1];
+
+    useEffect(() => {
+        if (typeof latest?.bladePitch === "number") {
+            setPitchAngle(latest.bladePitch);
+        }
+    }, [latest?.bladePitch, latest?.timestamp]);
 
     const secondsSinceUpdate = useMemo(() => {
         const ts = toTimestamp(latest?.timestamp);
@@ -220,6 +168,34 @@ const OneWindMill = () => {
             .slice(0, 8);
     }, [alerts, deviceId]);
 
+    const telemetryFields = useMemo<TelemetryField[]>(() => {
+        if (!latest) return [];
+
+        return [
+            {label: "Measurement ID", value: latest.id !== undefined ? String(latest.id) : "-"},
+            {label: "Turbine ID", value: latest.turbineId ?? "-"},
+            {label: "Turbine name", value: latest.turbineName ?? "-"},
+            {label: "Farm ID", value: latest.farmId ?? "-"},
+            {label: "Timestamp", value: formatDateTime(latest.timestamp)},
+            {label: "Created at", value: formatDateTime(latest.createdAt)},
+            {label: "Wind speed", value: formatNumber(latest.windSpeed, 1, " m/s")},
+            {label: "Wind direction", value: formatNumber(latest.windDirection, 1, "°")},
+            {label: "Ambient temperature", value: formatNumber(latest.ambientTemperature, 1, " °C")},
+            {label: "Rotor speed", value: formatNumber(latest.rotorSpeed, 1, " rpm")},
+            {label: "Power output", value: formatNumber(latest.powerOutput, 1, " kW"), tone: "text-primary"},
+            {label: "Nacelle direction", value: formatNumber(latest.nacelleDirection, 1, "°")},
+            {label: "Blade pitch", value: formatNumber(latest.bladePitch, 1, "°")},
+            {label: "Generator temperature", value: formatNumber(latest.generatorTemp, 1, " °C"), tone: "text-warning"},
+            {label: "Gearbox temperature", value: formatNumber(latest.gearboxTemp, 1, " °C")},
+            {label: "Vibration", value: formatNumber(latest.vibration, 2, " mm/s")},
+            {
+                label: "Operating state",
+                value: latest.isRunning ? "RUNNING" : "STOPPED",
+                tone: latest.isRunning ? "text-success" : "text-error"
+            }
+        ];
+    }, [latest]);
+
     const sendAction = async (payload: ActionRequest) => {
         if (!latest?.turbineId || !latest.farmId) return;
         setActionLoading(true);
@@ -251,30 +227,24 @@ const OneWindMill = () => {
                     <Link to="/dashboard" className="btn btn-outline">Back to overview</Link>
                 </div>
 
-                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                    <div className="stat rounded-box bg-base-100 shadow">
-                        <div className="stat-title">Current power</div>
-                        <div className="stat-value text-primary">{(latest?.powerOutput ?? 0).toFixed(1)}</div>
-                        <div className="stat-desc">kW</div>
-                    </div>
-                    <div className="stat rounded-box bg-base-100 shadow">
-                        <div className="stat-title">Wind speed</div>
-                        <div className="stat-value text-success">{(latest?.windSpeed ?? 0).toFixed(1)}</div>
-                        <div className="stat-desc">m/s</div>
-                    </div>
-                    <div className="stat rounded-box bg-base-100 shadow">
-                        <div className="stat-title">Generator temp</div>
-                        <div className="stat-value text-warning">{(latest?.generatorTemp ?? 0).toFixed(1)}</div>
-                        <div className="stat-desc">C</div>
-                    </div>
-                    <div className="stat rounded-box bg-base-100 shadow">
-                        <div className="stat-title">Status</div>
-                        <div className={`stat-value ${(latest?.isRunning ?? false) ? "text-success" : "text-error"}`}>
-                            {(latest?.isRunning ?? false) ? "RUNNING" : "STOPPED"}
+                <div className="rounded-box bg-base-100 p-4 shadow-lg">
+                    <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                            <h2 className="text-lg font-semibold">Live telemetry details</h2>
+                            <p className="text-sm opacity-70">Latest values from the selected windmill measurement.</p>
                         </div>
-                        <div className="stat-desc">
-                            {secondsSinceUpdate === null ? "No timestamp" : `Last updated ${secondsSinceUpdate}s ago`}
-                        </div>
+                        <span className="badge badge-outline">
+                            {secondsSinceUpdate === null ? "No timestamp" : `Updated ${secondsSinceUpdate}s ago`}
+                        </span>
+                    </div>
+
+                    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                        {telemetryFields.map((field) => (
+                            <div key={field.label} className="rounded-box bg-base-200 p-3">
+                                <div className="text-xs uppercase tracking-wide opacity-60">{field.label}</div>
+                                <div className={`mt-2 text-base font-semibold ${field.tone ?? ""}`}>{field.value}</div>
+                            </div>
+                        ))}
                     </div>
                 </div>
 

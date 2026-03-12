@@ -1,16 +1,10 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import {useNavigate} from "react-router-dom";
-import {StateleSSEClient} from "statele-sse";
 import {type TurbineAlert as ApiTurbineAlert, type TurbineTelemetry} from "../generated-ts-client.ts";
-import {createWebClient, getSseUrl} from "../util/apiClient.ts";
+import {getSharedSseClient, getSharedWebClient} from "../util/apiClient.ts";
+import {mergeAlerts, mergeTelemetry, normalizePayload, normalizeSeverity, toTimestamp} from "../util/windmillRealtime.ts";
 
 type TurbineStatus = "running" | "stopped";
-
-const MAX_POINTS_PER_TURBINE = 32;
-
-
-const sse = new StateleSSEClient(getSseUrl());
-const restClient = createWebClient();
 
 interface AlertFeedItem {
     id: string;
@@ -39,29 +33,10 @@ const severityTone: Record<string, number> = {
     critical: 860
 };
 
-const MAX_ALERT_ITEMS = 120;
-
-const normalizeSeverity = (severity?: string): string => {
-    const value = severity?.toLowerCase();
-    if (value === "critical" || value === "error" || value === "warning") return value;
-    return "warning";
-};
-
-const toTimestamp = (value?: string) => {
-    if (!value) return 0;
-    const parsed = Date.parse(value);
-    return Number.isNaN(parsed) ? 0 : parsed;
-};
-
 const formatAt = (value?: string) => {
     if (!value) return "-";
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? "-" : date.toLocaleTimeString();
-};
-
-type PayloadResult<T> = {
-    items: T[];
-    isSnapshot: boolean;
 };
 
 type HeartbeatState = {
@@ -71,63 +46,6 @@ type HeartbeatState = {
     dotClass: string;
 };
 
-const normalizePayload = <T,>(payload: unknown): PayloadResult<T> => {
-    if (Array.isArray(payload)) return {items: payload as T[], isSnapshot: true};
-
-    if (payload && typeof payload === "object") {
-        const maybeData = (payload as {data?: unknown}).data;
-        if (Array.isArray(maybeData)) return {items: maybeData as T[], isSnapshot: true};
-        if (maybeData && typeof maybeData === "object") return {items: [maybeData as T], isSnapshot: false};
-        return {items: [payload as T], isSnapshot: false};
-    }
-
-    return {items: [], isSnapshot: false};
-};
-
-const mergeTelemetry = (prev: TurbineTelemetry[], incoming: TurbineTelemetry[], isSnapshot: boolean) => {
-    const base = isSnapshot ? incoming : [...prev, ...incoming];
-    const byTurbine = new Map<string, TurbineTelemetry[]>();
-
-    for (const item of base) {
-        if (!item.turbineId) continue;
-        const list = byTurbine.get(item.turbineId) ?? [];
-        list.push(item);
-        byTurbine.set(item.turbineId, list);
-    }
-
-    const next: TurbineTelemetry[] = [];
-    for (const list of byTurbine.values()) {
-        const dedup = new Map<string, TurbineTelemetry>();
-        for (const item of list) {
-            const key = item.id !== undefined
-                ? `id:${item.id}`
-                : `${item.turbineId ?? "t"}-${item.timestamp ?? ""}-${item.powerOutput ?? ""}`;
-            dedup.set(key, item);
-        }
-
-        next.push(...[...dedup.values()]
-            .sort((a, b) => toTimestamp(a.timestamp) - toTimestamp(b.timestamp))
-            .slice(-MAX_POINTS_PER_TURBINE));
-    }
-
-    return next;
-};
-
-const mergeAlerts = (prev: ApiTurbineAlert[], incoming: ApiTurbineAlert[], isSnapshot: boolean) => {
-    const base = isSnapshot ? incoming : [...incoming, ...prev];
-    const deduped = new Map<string, ApiTurbineAlert>();
-
-    for (const alert of base) {
-        const key = alert.id !== undefined
-            ? `id:${alert.id}`
-            : `${alert.turbineId ?? "t"}-${alert.timestamp ?? ""}-${alert.message ?? ""}`;
-        deduped.set(key, alert);
-    }
-
-    return [...deduped.values()]
-        .sort((a, b) => toTimestamp(b.timestamp) - toTimestamp(a.timestamp))
-        .slice(0, MAX_ALERT_ITEMS);
-};
 
 const getHeartbeatState = (timestamp: string | undefined, nowMs: number): HeartbeatState => {
     const ts = toTimestamp(timestamp);
@@ -183,6 +101,8 @@ const WindmillVisual = ({status}: {status: TurbineStatus}) => (
 
 const AllWindMills = () => {
     const navigate = useNavigate();
+    const sse = useMemo(() => getSharedSseClient(), []);
+    const restClient = useMemo(() => getSharedWebClient(), []);
     const [muteAlerts, setMuteAlerts] = useState(false);
     const [measurements, setMeasurements] = useState<TurbineTelemetry[]>([]);
     const [alerts, setAlerts] = useState<ApiTurbineAlert[]>([]);
